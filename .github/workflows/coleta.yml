@@ -53,6 +53,12 @@ jobs:
         continue-on-error: true
         run: node src/verify-output.js
 
+      - name: Ler íntegra e gerar triagem jurídica SEDET/AJL
+        id: triage
+        if: steps.verify.outcome == 'success'
+        continue-on-error: true
+        run: node src/triage.js
+
       - name: Publicar evidências da execução
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,7 +74,16 @@ jobs:
         run: |
           echo '## Coleta DODF' >> "$GITHUB_STEP_SUMMARY"
           find output -name status.txt -type f -print -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          if find output -name relatorio-juridico.md -type f | grep -q .; then
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '## Triagem jurídica SEDET/AJL' >> "$GITHUB_STEP_SUMMARY"
+            find output -name relatorio-juridico.md -type f -exec sed -n '1,80p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          fi
 
       - name: Marcar execução como falha técnica quando não houver PDF validado
         if: steps.verify.outcome == 'failure'
+        run: exit 1
+
+      - name: Marcar falha da triagem quando o PDF foi validado mas a leitura integral falhou
+        if: steps.verify.outcome == 'success' && steps.triage.outcome == 'failure'
         run: exit 1
