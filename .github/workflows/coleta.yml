@@ -43,10 +43,15 @@ jobs:
             echo "DODF_DATE=${{ github.event.inputs.dodf_date }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Coletar e validar DODF
+      - name: Coletar candidatos DODF
         id: collect
         continue-on-error: true
         run: npm run collect
+
+      - name: Validar data exata no cabeçalho
+        id: verify
+        continue-on-error: true
+        run: node src/verify-output.js
 
       - name: Publicar evidências da execução
         if: always()
@@ -65,5 +70,5 @@ jobs:
           find output -name status.txt -type f -print -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: Marcar execução como falha técnica quando não houver PDF validado
-        if: steps.collect.outcome == 'failure'
+        if: steps.verify.outcome == 'failure'
         run: exit 1
