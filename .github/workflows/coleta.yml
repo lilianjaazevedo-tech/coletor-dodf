@@ -59,6 +59,12 @@ jobs:
         continue-on-error: true
         run: node src/triage.js
 
+      - name: Consolidar duplicidades por data+edição+seção+página+ato
+        id: consolidate
+        if: steps.verify.outcome == 'success' && steps.triage.outcome == 'success'
+        continue-on-error: true
+        run: node src/consolidate-triage.js
+
       - name: Publicar evidências da execução
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,7 +83,7 @@ jobs:
           if find output -name relatorio-juridico.md -type f | grep -q .; then
             echo '' >> "$GITHUB_STEP_SUMMARY"
             echo '## Triagem jurídica SEDET/AJL' >> "$GITHUB_STEP_SUMMARY"
-            find output -name relatorio-juridico.md -type f -exec sed -n '1,80p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+            find output -name relatorio-juridico.md -type f -exec sed -n '1,100p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           fi
 
       - name: Marcar execução como falha técnica quando não houver PDF validado
@@ -85,5 +91,5 @@ jobs:
         run: exit 1
 
       - name: Marcar falha da triagem quando o PDF foi validado mas a leitura integral falhou
-        if: steps.verify.outcome == 'success' && steps.triage.outcome == 'failure'
+        if: steps.verify.outcome == 'success' && (steps.triage.outcome == 'failure' || steps.consolidate.outcome == 'failure')
         run: exit 1
