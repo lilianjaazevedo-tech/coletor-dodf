@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { chromium } from 'playwright';
 import pdf from 'pdf-parse';
 
@@ -18,12 +19,14 @@ const report = {
   startedAt: new Date().toISOString(),
   routes: [],
   candidates: [],
+  rejected: [],
   validated: [],
   status: 'COLETA AUTOMÁTICA NÃO VALIDADA — não foi possível obter o arquivo pelos canais acessíveis nesta execução'
 };
 
 const officialHosts = new Set(['dodf.df.gov.br', 'www.sinj.df.gov.br', 'sinj.df.gov.br']);
 const seen = new Set();
+const validatedHashes = new Set();
 
 function addRoute(name, url, result, detail = '') {
   report.routes.push({ name, url, result, detail, at: new Date().toISOString() });
@@ -34,8 +37,16 @@ function isOfficial(u) {
 function abs(base, href) {
   try { return new URL(href, base).href; } catch { return null; }
 }
+function isPotentialDocument(url) {
+  try {
+    const u = new URL(url);
+    const s = `${u.pathname}${u.search}`;
+    if (/id_file=$/i.test(s)) return false;
+    return /\.pdf(?:$|\?)/i.test(s) || /TextoArquivoDiario|BaixarArquivoDiario|visualizar-pdf|\/Diario\//i.test(s);
+  } catch { return false; }
+}
 function addCandidate(url, source) {
-  if (!url || !isOfficial(url) || seen.has(url)) return;
+  if (!url || !isOfficial(url) || !isPotentialDocument(url) || seen.has(url)) return;
   seen.add(url);
   report.candidates.push({ url, source });
 }
@@ -43,7 +54,7 @@ async function fetchText(url, timeout = 25000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.0' } });
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.1' } });
     const text = await res.text();
     return { ok: res.ok, status: res.status, url: res.url, text, type: res.headers.get('content-type') || '' };
   } finally { clearTimeout(timer); }
@@ -52,20 +63,49 @@ async function fetchBuffer(url, timeout = 45000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.0' } });
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.1' } });
     const buf = Buffer.from(await res.arrayBuffer());
     return { ok: res.ok, status: res.status, url: res.url, buf, type: res.headers.get('content-type') || '' };
   } finally { clearTimeout(timer); }
 }
 function looksLikePdf(buf) { return buf?.subarray(0, 5).toString() === '%PDF-'; }
 function normalize(s='') { return s.replace(/\s+/g, ' ').trim(); }
-function validateText(text) {
-  const t = normalize(text).toLowerCase();
-  const dateOK = t.includes(BR.toLowerCase()) || t.includes(PT.toLowerCase()) || t.includes(`${dd} de ${PT.split(' de ')[1]}`.toLowerCase());
-  const headerOK = t.includes('diário oficial do distrito federal') || t.includes('diario oficial do distrito federal');
-  const editionMatch = normalize(text).match(/DODF\s*(?:N[º°o.]*)?\s*(\d{1,4})/i) || normalize(text).match(/N[º°o.]\s*(\d{1,4})/i);
-  const typeMatch = normalize(text).match(/\b(SUPLEMENTO|EDIÇÃO EXTRA|EDICAO EXTRA|EXTRA|ESPECIAL)\b/i);
-  return { dateOK, headerOK, edition: editionMatch?.[1] || null, type: typeMatch?.[1]?.toUpperCase() || 'NORMAL' };
+function ascii(s='') { return normalize(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase(); }
+
+function validateFirstPage(text) {
+  const page = normalize(text);
+  const a = ascii(page);
+  const requestedDateWords = ascii(PT);
+  const dateOK = a.includes(requestedDateWords) || a.includes(BR);
+
+  // O cabeçalho oficial de 2026 traz ANO + EDIÇÃO Nº + BRASÍLIA - DF + data.
+  // A edição é extraída SOMENTE da primeira página, jamais de referências no corpo do diário.
+  const editionMatch = a.match(/\bANO\s+[A-Z0-9]+\s+EDICAO\s+(?:N[O.]?\s*)?(\d{1,4})\b/)
+    || a.match(/\bEDICAO\s+(?:N[O.]?\s*)?(\d{1,4})\b/);
+  const locationOK = /\bBRASILIA\s*-\s*DF\b/.test(a);
+  const officialFooterOK = /DOCUMENTO ASSINADO DIGITALMENTE[\s\S]{0,180}(?:WWW\.)?DODF\.DF\.GOV\.BR/.test(a);
+  const headerOK = Boolean(editionMatch) && locationOK;
+
+  // Só classifica tipo quando ele estiver explicitamente ligado à palavra EDIÇÃO/SUPLEMENTO.
+  // Isso evita confundir expressões do conteúdo, como “Área Especial”, com tipo de diário.
+  let type = 'NORMAL';
+  if (/\bSUPLEMENTO\b/.test(a.slice(0, 2500))) type = 'SUPLEMENTO';
+  else if (/\bEDICAO\s+EXTRA\b/.test(a.slice(0, 2500))) type = 'EDIÇÃO EXTRA';
+  else if (/\bEDICAO\s+ESPECIAL\b/.test(a.slice(0, 2500))) type = 'ESPECIAL';
+
+  return {
+    dateOK,
+    headerOK,
+    officialFooterOK,
+    edition: editionMatch?.[1] || null,
+    type,
+    evidence: {
+      requestedDate: PT,
+      headerEdition: editionMatch?.[0] || null,
+      locationOK,
+      officialFooterOK
+    }
+  };
 }
 
 // Camada 1 — Portal DODF, HTML + navegador dinâmico.
@@ -84,13 +124,13 @@ try {
   const responses = [];
   page.on('response', r => {
     const u = r.url();
-    if (isOfficial(u) && (/\.pdf(?:\?|$)/i.test(u) || /ArquivoDiario|visualizar-pdf|TextoArquivoDiario|jornal/i.test(u))) responses.push(u);
+    if (isOfficial(u) && isPotentialDocument(u)) responses.push(u);
   });
   await page.goto(portal, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForTimeout(8000);
   for (const u of responses) addCandidate(u, 'portal-browser-response');
   for (const href of await page.locator('a').evaluateAll(as => as.map(a => a.href))) addCandidate(href, 'portal-browser-link');
-  addRoute('Portal DODF navegador', portal, 'OK', `links=${report.candidates.length}`);
+  addRoute('Portal DODF navegador', portal, 'OK', `candidatos=${report.candidates.length}`);
 } catch (e) { addRoute('Portal DODF navegador', portal, 'PAYLOAD DINÂMICO NÃO ACESSÍVEL', String(e)); }
 
 // Camada 2 — SINJ: diretório e pesquisa textual por data exata.
@@ -110,13 +150,13 @@ if (browser) {
     try {
       const p = await browser.newPage({ locale: 'pt-BR', timezoneId: TZ });
       const responses = [];
-      p.on('response', r => { const u = r.url(); if (isOfficial(u)) responses.push(u); });
+      p.on('response', r => { const u = r.url(); if (isOfficial(u) && isPotentialDocument(u)) responses.push(u); });
       await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await p.waitForTimeout(4000);
       const body = await p.locator('body').innerText().catch(() => '');
-      for (const u of responses) if (/pdf|diario|arquivo/i.test(u)) addCandidate(u, 'sinj-browser-response');
+      for (const u of responses) addCandidate(u, 'sinj-browser-response');
       for (const href of await p.locator('a').evaluateAll(as => as.map(a => a.href))) addCandidate(href, 'sinj-browser-link');
-      addRoute('SINJ navegador', url, /aguarde|carregando/i.test(body) ? 'PAYLOAD DINÂMICO NÃO ACESSÍVEL' : 'OK', `data=${BR}`);
+      addRoute('SINJ navegador', url, /aguarde|carregando/i.test(body) ? 'PAYLOAD DINÂMICO NÃO ACESSÍVEL' : 'OK', `data-alvo=${BR}; candidatos=${report.candidates.length}`);
       await p.close();
     } catch (e) { addRoute('SINJ navegador', url, 'PAYLOAD DINÂMICO NÃO ACESSÍVEL', String(e)); }
   }
@@ -145,29 +185,50 @@ if (browser) {
           const parsed = new URL(href);
           if (parsed.hostname.includes('google.') && parsed.searchParams.get('q')) u = parsed.searchParams.get('q');
         } catch {}
-        if (isOfficial(u)) { addCandidate(u, 'indexed-search'); count++; }
+        if (isOfficial(u) && isPotentialDocument(u)) { addCandidate(u, 'indexed-search'); count++; }
       }
-      addRoute('Busca indexada', q, 'OK', `urls-oficiais=${count}`);
+      addRoute('Busca indexada', q, 'OK', `urls-oficiais-potenciais=${count}`);
       await p.close();
     } catch (e) { addRoute('Busca indexada', q, 'FALHA_DO_CANAL', String(e)); }
   }
 }
 
-// Camada 4/5 — abre candidatos e valida somente o próprio PDF.
+// Camada 4/5 — abre candidatos e valida SOMENTE pelo próprio PDF.
+// A validação positiva exige que a PRIMEIRA PÁGINA confirme data, cabeçalho, edição e origem oficial.
 const expanded = [...report.candidates];
-for (let i = 0; i < expanded.length && i < 120; i++) {
+for (let i = 0; i < expanded.length && i < 160; i++) {
   const c = expanded[i];
   try {
     const r = await fetchBuffer(c.url);
     if (looksLikePdf(r.buf) || /application\/pdf/i.test(r.type)) {
-      const parsed = await pdf(r.buf);
-      const v = validateText(parsed.text || '');
-      if (v.dateOK && v.headerOK) {
-        const safeType = v.type.replace(/[^A-Z0-9]+/g, '_');
-        const fname = `DODF_${v.edition || 'SEM_NUMERO'}_${DAY}_${safeType}.pdf`;
+      const firstPage = await pdf(r.buf, { max: 1 });
+      const v = validateFirstPage(firstPage.text || '');
+      const digest = crypto.createHash('sha256').update(r.buf).digest('hex');
+      if (v.dateOK && v.headerOK && v.officialFooterOK && v.edition) {
+        if (validatedHashes.has(digest)) continue;
+        validatedHashes.add(digest);
+        const safeType = v.type.replace(/[^A-Z0-9À-Ú]+/gi, '_');
+        const fname = `DODF_${v.edition}_${DAY}_${safeType}.pdf`;
         const fpath = path.join(outDir, fname);
         await fs.writeFile(fpath, r.buf);
-        report.validated.push({ url: r.url, source: c.source, pages: parsed.numpages, edition: v.edition, type: v.type, file: fpath });
+        report.validated.push({
+          url: r.url,
+          source: c.source,
+          pages: firstPage.numpages,
+          edition: v.edition,
+          type: v.type,
+          sha256: digest,
+          evidence: v.evidence,
+          file: fpath
+        });
+      } else {
+        report.rejected.push({
+          url: r.url,
+          source: c.source,
+          pages: firstPage.numpages,
+          reason: 'PRIMEIRA PÁGINA NÃO CONFIRMA POSITIVAMENTE DATA/CABEÇALHO/EDIÇÃO/ORIGEM',
+          validation: v
+        });
       }
       continue;
     }
@@ -175,8 +236,9 @@ for (let i = 0; i < expanded.length && i < 120; i++) {
       const html = r.buf.toString('utf8');
       for (const m of html.matchAll(/(?:href|src)=["']([^"']+)["']/gi)) {
         const u = abs(r.url, m[1]);
-        if (u && isOfficial(u) && !seen.has(u) && (/pdf|ArquivoDiario|visualizar-pdf|TextoArquivoDiario/i.test(u))) {
-          addCandidate(u, `expanded:${c.source}`); expanded.push({ url: u, source: `expanded:${c.source}` });
+        if (u && isOfficial(u) && isPotentialDocument(u) && !seen.has(u)) {
+          addCandidate(u, `expanded:${c.source}`);
+          expanded.push({ url: u, source: `expanded:${c.source}` });
         }
       }
     }
