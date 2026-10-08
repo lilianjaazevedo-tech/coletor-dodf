@@ -54,7 +54,7 @@ async function fetchText(url, timeout = 25000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.1' } });
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.2' } });
     const text = await res.text();
     return { ok: res.ok, status: res.status, url: res.url, text, type: res.headers.get('content-type') || '' };
   } finally { clearTimeout(timer); }
@@ -63,7 +63,7 @@ async function fetchBuffer(url, timeout = 45000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.1' } });
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'user-agent': 'Mozilla/5.0 DODF-Collector/1.2' } });
     const buf = Buffer.from(await res.arrayBuffer());
     return { ok: res.ok, status: res.status, url: res.url, buf, type: res.headers.get('content-type') || '' };
   } finally { clearTimeout(timer); }
@@ -78,10 +78,12 @@ function validateFirstPage(text) {
   const requestedDateWords = ascii(PT);
   const dateOK = a.includes(requestedDateWords) || a.includes(BR);
 
-  // O cabeçalho oficial de 2026 traz ANO + EDIÇÃO Nº + BRASÍLIA - DF + data.
+  // Cabeçalho oficial observado: "ANO LV EDIÇÃO Nº 185 BRASÍLIA - DF, ...".
+  // O símbolo º não é removido pela normalização NFD, portanto precisa ser aceito explicitamente.
   // A edição é extraída SOMENTE da primeira página, jamais de referências no corpo do diário.
-  const editionMatch = a.match(/\bANO\s+[A-Z0-9]+\s+EDICAO\s+(?:N[O.]?\s*)?(\d{1,4})\b/)
-    || a.match(/\bEDICAO\s+(?:N[O.]?\s*)?(\d{1,4})\b/);
+  const editionMatch = a.match(/\bANO\s+[A-Z0-9]+\s+EDICAO\s+(?:N\s*(?:O|º|°|\.)?\s*)?(\d{1,4})\b/)
+    || a.match(/\bEDICAO\s+(?:N\s*(?:O|º|°|\.)?\s*)?(\d{1,4})\b/)
+    || a.match(/\bDIARIO\s+OFICIAL\s+DO\s+DISTRITO\s+FEDERAL\s+(?:N\s*(?:O|º|°|\.)?\s*)?(\d{1,4})\b/);
   const locationOK = /\bBRASILIA\s*-\s*DF\b/.test(a);
   const officialFooterOK = /DOCUMENTO ASSINADO DIGITALMENTE[\s\S]{0,180}(?:WWW\.)?DODF\.DF\.GOV\.BR/.test(a);
   const headerOK = Boolean(editionMatch) && locationOK;
@@ -103,7 +105,8 @@ function validateFirstPage(text) {
       requestedDate: PT,
       headerEdition: editionMatch?.[0] || null,
       locationOK,
-      officialFooterOK
+      officialFooterOK,
+      firstPageStart: page.slice(0, 500)
     }
   };
 }
