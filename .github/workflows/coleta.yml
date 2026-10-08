@@ -1,0 +1,70 @@
+name: Coleta oficial DODF
+
+on:
+  workflow_dispatch:
+    inputs:
+      dodf_date:
+        description: 'Data opcional YYYY-MM-DD'
+        required: false
+        type: string
+  schedule:
+    # Brasília = UTC-3. Executa 6h,7h,8h,9h,10h,11h,12h em dias úteis.
+    - cron: '0 9-15 * * 1-5'
+
+permissions:
+  contents: read
+
+env:
+  TZ: America/Sao_Paulo
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Instalar Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Definir data solicitada
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.dodf_date }}" ]; then
+            echo "DODF_DATE=${{ github.event.inputs.dodf_date }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Coletar e validar DODF
+        id: collect
+        continue-on-error: true
+        run: npm run collect
+
+      - name: Publicar evidências da execução
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dodf-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Resumo
+        if: always()
+        shell: bash
+        run: |
+          echo '## Coleta DODF' >> "$GITHUB_STEP_SUMMARY"
+          find output -name status.txt -type f -print -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Marcar execução como falha técnica quando não houver PDF validado
+        if: steps.collect.outcome == 'failure'
+        run: exit 1
