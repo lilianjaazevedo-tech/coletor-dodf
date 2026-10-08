@@ -1,6 +1,11 @@
 name: Coleta oficial DODF
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - '.github/workflows/coleta.yml'
   workflow_dispatch:
     inputs:
       dodf_date:
@@ -83,7 +88,7 @@ jobs:
           if find output -name relatorio-juridico.md -type f | grep -q .; then
             echo '' >> "$GITHUB_STEP_SUMMARY"
             echo '## Triagem jurídica SEDET/AJL' >> "$GITHUB_STEP_SUMMARY"
-            find output -name relatorio-juridico.md -type f -exec sed -n '1,100p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+            find output -name relatorio-juridico.md -type f -exec sed -n '1,140p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           fi
 
       - name: Marcar execução como falha técnica quando não houver PDF validado
