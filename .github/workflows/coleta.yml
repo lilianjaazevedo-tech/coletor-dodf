@@ -120,6 +120,4 @@ jobs:
           find output -name status.txt -type f -print -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo '## Controle de validação (não equivale a revisão jurídica)' >> "$GITHUB_STEP_SUMMARY"
-          find output -name boletim-controle.md -type f -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || truend output -name relatorio-juridico.md -type f -exec sed -n '1,140p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          fi
-
+          find output -name boletim-controle.md -type f -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
