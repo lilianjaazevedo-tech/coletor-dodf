@@ -92,6 +92,10 @@ jobs:
         id: consolidate
         run: node src/consolidate-triage.js
 
+      - name: Auditar independentemente atos de pessoal e nomes em todas as seções
+        id: second_pass
+        run: node src/audit-second-pass.js
+
       - name: Gerar boletim diário e delta sem presunção de auditoria humana
         id: delivery
         run: node src/delivery-gate.js
