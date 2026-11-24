@@ -18,12 +18,14 @@ function load(p,fallback){return fs.readFile(p,'utf8').then(JSON.parse).catch(()
 const report=await load(path.join(DIR,'report.json'),{});
 const triage=await load(path.join(DIR,'triagem.json'),{});
 const previous=await load(STATE_PATH,{});
+const secondPass=await load(path.join(DIR,'segunda-passagem.json'),{});
 const docs=triage.documents||[];
 const findings=triage.findings||[];
 const sourceOK=report.status==='OBTIDO E VALIDADO' && docs.length>0;
 const nominal=(triage.nominalAudit||[]);
 const nominalOK=nominal.length===10 && nominal.every(x=>Number(x.checkedDocuments||0)===docs.length);
-const automaticOK=sourceOK && !(triage.parseErrors||[]).length && nominalOK &&
+const secondPassOK=Boolean(secondPass.generatedAt) && secondPass.documentCount===docs.length && !(secondPass.disagreementsWithFirstPass||[]).length && secondPass.result!=='TRIAGEM NÃO VALIDADA';
+const automaticOK=sourceOK && secondPassOK && !(triage.parseErrors||[]).length && nominalOK &&
   String(triage.qualityStatus||'').startsWith('AUDITORIA AUTOMÁTICA POR COLUNAS CONCLUÍDA');
 const fingerprints=[...new Set(findings.map(f=>sha(identity(f))))];
 const prevSeen=new Set(previous.date===DAY?(previous.fingerprints||[]):[]);
@@ -40,7 +42,7 @@ const payload={
   date:DAY,generatedAt:now.toISOString(),timezone:TZ,mode:reportMode,status,
   sourceValidated:sourceOK,automaticAuditPassed:automaticOK,humanLegalReview:'PENDENTE',
   editions:docs.map(d=>({edition:d.edition,type:d.type,pages:d.pages,url:d.url})),
-  nominalAudit:nominal,parseErrors:triage.parseErrors||[],
+  nominalAudit:nominal,secondPass:{status:secondPass.result||'NÃO EXECUTADA',reviewQueue:secondPass.reviewQueue||[],disagreements:secondPass.disagreementsWithFirstPass||[]},parseErrors:triage.parseErrors||[],
   totalFindings:findings.length,newCandidateFindings:newFindings.length,
   findingsToReview:candidates,readyToNotify,
   note:'Boletim de candidatos para revisão. Nenhum achado foi certificado juridicamente ou enviado automaticamente.'
@@ -51,7 +53,9 @@ const md=[
   '# CONTROLE DE COLETA DODF — '+DAY,'',
   '**Modo:** '+reportMode,'**Fonte:** '+status,
   '**Auditoria automática:** '+(automaticOK?'PASSOU (não substitui auditoria humana)':'NÃO VALIDADA'),
-  '**Auditoria jurídica humana:** PENDENTE','',
+  '**Auditoria jurídica humana:** PENDENTE',
+  '**Páginas sinalizadas para exame visual:** '+(secondPass.reviewQueue||[]).length,
+  '**Divergências nominais:** '+(secondPass.disagreementsWithFirstPass||[]).length,'',
   '**Edições recuperadas:** '+docs.length,'**Candidatos novos (a revisar):** '+newFindings.length,'',
   'A ausência de achados automáticos não comprova ausência de publicações.',
   'Não houve envio de notificação, e-mail nem alteração administrativa.'
