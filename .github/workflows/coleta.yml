@@ -13,11 +13,18 @@ on:
         required: false
         type: string
   schedule:
-    # Brasília = UTC-3. Executa 6h,7h,8h,9h,10h,11h,12h em dias úteis.
-    - cron: '0 9-15 * * 1-5'
+    # GitHub Actions usa UTC; Brasília = UTC-3. Minutos deslocados para evitar pico :00.
+    # 06:07-12:07 de Brasília em dias úteis.
+    - cron: '7 9-15 * * 1-5'
+    # Reconferência das 15:17 de Brasília.
+    - cron: '17 18 * * 1-5'
 
 permissions:
   contents: read
+
+concurrency:
+  group: dodf-coleta-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   TZ: America/Sao_Paulo
@@ -25,7 +32,7 @@ env:
 jobs:
   coletar:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,34 +48,60 @@ jobs:
       - name: Instalar Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Definir data solicitada
+      - name: Definir data de Brasília
         shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.dodf_date }}" ]; then
-            echo "DODF_DATE=${{ github.event.inputs.dodf_date }}" >> "$GITHUB_ENV"
+          echo "DODF_DATE=${{ github.event.inputs.dodf_date || '' }}" >> "$GITHUB_ENV"
+          if [ -z "${{ github.event.inputs.dodf_date || '' }}" ]; then
+            echo "DODF_DATE=$(TZ=America/Sao_Paulo date +%F)" >> "$GITHUB_ENV"
           fi
 
-      - name: Coletar candidatos DODF
-        id: collect
-        continue-on-error: true
-        run: npm run collect
+      - name: Restaurar controle diário anterior
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/
+          key: dodf-estado-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            dodf-estado-${{ github.ref_name }}-
 
-      - name: Validar data exata no cabeçalho
+      - name: Coletar e validar com contingência
         id: verify
-        continue-on-error: true
-        run: node src/verify-output.js
+        shell: bash
+        run: |
+          ok=0
+          for tentativa in 1 2 3; do
+            echo "Tentativa $tentativa/3 — data $DODF_DATE"
+            rm -rf "output/$DODF_DATE"
+            mkdir -p "output/$DODF_DATE"
+            if npm run collect && node src/verify-output.js; then
+              ok=1
+              break
+            fi
+            if [ "$tentativa" -lt 3 ]; then sleep $((tentativa * 45)); fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "COLETA AUTOMÁTICA NÃO VALIDADA — não foi possível obter o arquivo pelos canais acessíveis nesta execução"
+            exit 1
+          fi
 
       - name: Ler íntegra e gerar triagem jurídica SEDET/AJL
         id: triage
-        if: steps.verify.outcome == 'success'
-        continue-on-error: true
         run: node src/triage.js
 
       - name: Consolidar duplicidades por data+edição+seção+página+ato
         id: consolidate
-        if: steps.verify.outcome == 'success' && steps.triage.outcome == 'success'
-        continue-on-error: true
         run: node src/consolidate-triage.js
+
+      - name: Gerar boletim diário e delta sem presunção de auditoria humana
+        id: delivery
+        run: node src/delivery-gate.js
+
+      - name: Salvar controle de duplicidades do dia
+        if: steps.delivery.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .state/
+          key: dodf-estado-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Publicar evidências da execução
         if: always()
@@ -85,16 +118,6 @@ jobs:
         run: |
           echo '## Coleta DODF' >> "$GITHUB_STEP_SUMMARY"
           find output -name status.txt -type f -print -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          if find output -name relatorio-juridico.md -type f | grep -q .; then
-            echo '' >> "$GITHUB_STEP_SUMMARY"
-            echo '## Triagem jurídica SEDET/AJL' >> "$GITHUB_STEP_SUMMARY"
-            find output -name relatorio-juridico.md -type f -exec sed -n '1,140p' {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          fi
-
-      - name: Marcar execução como falha técnica quando não houver PDF validado
-        if: steps.verify.outcome == 'failure'
-        run: exit 1
-
-      - name: Marcar falha da triagem quando o PDF foi validado mas a leitura integral falhou
-        if: steps.verify.outcome == 'success' && (steps.triage.outcome == 'failure' || steps.consolidate.outcome == 'failure')
-        run: exit 1
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '## Controle de validação (não equivale a revisão jurídica)' >> "$GITHUB_STEP_SUMMARY"
+          find output -name boletim-controle.md -type f -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
